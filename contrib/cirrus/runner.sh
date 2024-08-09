@@ -97,12 +97,6 @@ function _run_endpoint() {
     showrun make endpoint
 }
 
-function _run_minikube() {
-    _bail_if_test_can_be_skipped test/minikube
-    msg "Testing  minikube."
-    showrun bats test/minikube |& logformatter
-}
-
 function _run_farm() {
     _bail_if_test_can_be_skipped test/farm test/system
     msg "Testing podman farm."
@@ -130,6 +124,7 @@ exec_container() {
 
     # VM Images and Container images are built using (nearly) identical operations.
     set -x
+    env CONTAINERS_REGISTRIES_CONF=/dev/null bin/podman pull -q $CTR_FQIN
     # shellcheck disable=SC2154
     exec bin/podman run --rm --privileged --net=host --cgroupns=host \
         -v `mktemp -d -p /var/tmp`:/var/tmp:Z \

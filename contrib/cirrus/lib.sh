@@ -72,6 +72,9 @@ CIRRUS_CI="${CIRRUS_CI:-false}"
 CONTINUOUS_INTEGRATION="${CONTINUOUS_INTEGRATION:-false}"
 CIRRUS_REPO_NAME=${CIRRUS_REPO_NAME:-podman}
 
+# All CI jobs use a local registry
+export CI_USE_REGISTRY_CACHE=true
+
 # shellcheck disable=SC2154
 if [[ -n "$CIRRUS_PR" ]] && [[ -z "$PR_BASE_SHA" ]]; then
     # shellcheck disable=SC2154
@@ -88,7 +91,7 @@ PASSTHROUGH_ENV_EXACT='CGROUP_MANAGER|DEST_BRANCH|DISTRO_NV|GOCACHE|GOPATH|GOSRC
 
 # List of envariable patterns which must match AT THE BEGINNING of the name.
 # Consumed by the passthrough_envars() automation library function.
-PASSTHROUGH_ENV_ATSTART='CI|LANG|LC_|TEST'
+PASSTHROUGH_ENV_ATSTART='CI|LANG|LC_|STORAGE_OPTIONS_|TEST'
 
 # List of envariable patterns which can match ANYWHERE in the name.
 # Consumed by the passthrough_envars() automation library function.
@@ -150,6 +153,9 @@ setup_rootless() {
     showrun groupadd -g $rootless_gid $ROOTLESS_USER
     showrun useradd -g $rootless_gid -u $rootless_uid --no-user-group --create-home $ROOTLESS_USER
 
+    # use tmpfs to speed up IO
+    mount -t tmpfs -o size=75%,mode=0700,uid=$rootless_uid,gid=$rootless_gid none /home/$ROOTLESS_USER
+
     echo "$ROOTLESS_USER ALL=(root) NOPASSWD: ALL" > /etc/sudoers.d/ci-rootless
 
     mkdir -p "$HOME/.ssh" "/home/$ROOTLESS_USER/.ssh"
@@ -189,8 +195,20 @@ setup_rootless() {
 }
 
 install_test_configs() {
-    msg "Installing ./test/registries.conf system-wide."
-    install -v -D -m 644 ./test/registries.conf /etc/containers/
+    # Which registries.conf to use. By default we always want the cached one...
+    cached="-cached"
+    # ...except for podman-machine, where it's antihelpful
+    if [[ -n "$1" ]]; then
+        if [[ "$1" = "nocache" ]]; then
+            cached=""
+        else
+            die "Internal error: install_test_configs(): unknown arg '$*'"
+        fi
+    fi
+
+    msg "Installing ./test/registries$cached.conf system-wide."
+    # All CI VMs run with a local registry
+    install -v -D -m 644 ./test/registries$cached.conf /etc/containers/registries.conf
 }
 
 # Remove all files provided by the distro version of podman.

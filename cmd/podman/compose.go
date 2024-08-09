@@ -170,6 +170,18 @@ func composeEnv() ([]string, error) {
 	}, nil
 }
 
+// composeShouldLogWarning returns whether a notice on engine redirection should be piped to stderr regardless of logging configuration
+func composeShouldLogWarning() (bool, error) {
+	if shouldWarnLogsEnv, ok := os.LookupEnv("PODMAN_COMPOSE_WARNING_LOGS"); ok {
+		if shouldWarnLogsEnvVal, err := strconv.ParseBool(shouldWarnLogsEnv); err == nil {
+			return shouldWarnLogsEnvVal, nil
+		} else if shouldWarnLogsEnv != "" {
+			return true, fmt.Errorf("PODMAN_COMPOSE_WARNING_LOGS should be a boolean: %w", err)
+		}
+	}
+	return registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs, nil
+}
+
 // underline uses ANSI codes to underline the specified string.
 func underline(str string) string {
 	return "\033[4m" + str + "\033[0m"
@@ -202,7 +214,7 @@ func composeProviderExec(args []string, stdout io.Writer, stderr io.Writer, warn
 	logrus.Debugf("Executing compose provider (%s %s) with additional env %s", provider, strings.Join(args, " "), strings.Join(env, " "))
 
 	if warn {
-		fmt.Fprint(os.Stderr, underline(fmt.Sprintf(">>>> Executing external compose provider %q. Please refer to the documentation for details. <<<<\n\n", provider)))
+		fmt.Fprint(os.Stderr, underline(fmt.Sprintf(">>>> Executing external compose provider %q. Please see podman-compose(1) for how to disable this message. <<<<\n\n", provider)))
 	}
 
 	if err := cmd.Run(); err != nil {
@@ -229,7 +241,11 @@ func composeHelp(cmd *cobra.Command) error {
 		return err
 	}
 
-	return composeProviderExec([]string{"--help"}, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec([]string{"--help"}, nil, nil, shouldLog)
 }
 
 // composeMain is the main function of the compose command.
@@ -249,5 +265,9 @@ func composeMain(cmd *cobra.Command, args []string) error {
 		return composeHelp(cmd)
 	}
 
-	return composeProviderExec(args, nil, nil, registry.PodmanConfig().ContainersConfDefaultsRO.Engine.ComposeWarningLogs)
+	shouldLog, err := composeShouldLogWarning()
+	if err != nil {
+		return err
+	}
+	return composeProviderExec(args, nil, nil, shouldLog)
 }

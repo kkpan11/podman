@@ -49,8 +49,12 @@ func (p *PodmanTestIntegration) PodmanExtraFiles(args []string, extraFiles []*os
 }
 
 func (p *PodmanTestIntegration) setDefaultRegistriesConfigEnv() {
-	defaultFile := filepath.Join(INTEGRATION_ROOT, "test/registries.conf")
-	os.Setenv("CONTAINERS_REGISTRIES_CONF", defaultFile)
+	defaultFile := "registries.conf"
+	if UsingCacheRegistry() {
+		defaultFile = "registries-cached.conf"
+	}
+	defaultPath := filepath.Join(INTEGRATION_ROOT, "test", defaultFile)
+	os.Setenv("CONTAINERS_REGISTRIES_CONF", defaultPath)
 }
 
 func (p *PodmanTestIntegration) setRegistriesConfigEnv(b []byte) {
@@ -99,7 +103,7 @@ func (p *PodmanTestIntegration) StartRemoteService() {
 }
 
 func (p *PodmanTestIntegration) StopRemoteService() {
-	if err := p.RemoteSession.Kill(); err != nil {
+	if err := p.RemoteSession.Signal(syscall.SIGTERM); err != nil {
 		GinkgoWriter.Printf("unable to clean up service %d, %v\n", p.RemoteSession.Pid, err)
 	}
 	if _, err := p.RemoteSession.Wait(); err != nil {

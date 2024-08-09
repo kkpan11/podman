@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containers/buildah"
@@ -32,6 +33,13 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
+
+func genSpaceErr(err error) error {
+	if errors.Is(err, syscall.ENOSPC) {
+		return fmt.Errorf("context directory may be too large: %w", err)
+	}
+	return err
+}
 
 func BuildImage(w http.ResponseWriter, r *http.Request) {
 	if hdr, found := r.Header["Content-Type"]; found && len(hdr) > 0 {
@@ -73,7 +81,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 
 	contextDirectory, err := extractTarFile(anchorDir, r)
 	if err != nil {
-		utils.InternalServerError(w, err)
+		utils.InternalServerError(w, genSpaceErr(err))
 		return
 	}
 
@@ -89,6 +97,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		CacheTo                 string   `schema:"cacheto"`
 		CacheTTL                string   `schema:"cachettl"`
 		CgroupParent            string   `schema:"cgroupparent"`
+		CompatVolumes           bool     `schema:"compatvolumes"`
 		Compression             uint64   `schema:"compression"`
 		ConfigureNetwork        string   `schema:"networkmode"`
 		CPPFlags                string   `schema:"cppflags"`
@@ -202,7 +211,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 		}
 		tempDir, subDir, err := buildahDefine.TempDirForURL(anchorDir, "buildah", query.Remote)
 		if err != nil {
-			utils.InternalServerError(w, err)
+			utils.InternalServerError(w, genSpaceErr(err))
 			return
 		}
 		if tempDir != "" {
@@ -694,6 +703,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 			Secrets:            secrets,
 			Volumes:            query.Volumes,
 		},
+		CompatVolumes:                  types.NewOptionalBool(query.CompatVolumes),
 		Compression:                    compression,
 		ConfigureNetwork:               parseNetworkConfigurationPolicy(query.ConfigureNetwork),
 		ContextDirectory:               contextDirectory,
@@ -740,7 +750,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {
 
 	platforms := query.Platform
 	if len(platforms) == 1 {
-		// Docker API uses comma sperated platform arg so match this here
+		// Docker API uses comma separated platform arg so match this here
 		platforms = strings.Split(query.Platform[0], ",")
 	}
 	for _, platformSpec := range platforms {

@@ -299,7 +299,7 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
 }
 
 # https://github.com/containers/podman/issues/13153
-@test "podman rootless-netns pasta processes should be in different cgroup" {
+@test "podman rootless-netns processes should be in different cgroup" {
     is_rootless || skip "only meaningful for rootless"
 
     cname=$(random_string)
@@ -319,7 +319,8 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
     # stop systemd container
     service_cleanup
 
-    pasta_iface=$(default_ifname)
+    pasta_iface=$(default_ifname 4)
+    assert "$pasta_iface" != "" "pasta_iface is set"
 
     # now check that the rootless netns slirp4netns process is still alive and working
     run_podman unshare --rootless-netns ip addr

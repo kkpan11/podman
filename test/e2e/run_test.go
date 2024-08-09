@@ -1687,6 +1687,19 @@ VOLUME %s`, ALPINE, volPath, volPath)
 		Expect(session).Should(ExitCleanly())
 	})
 
+	It("podman run --device and --privileged", func() {
+		session := podmanTest.Podman([]string{"run", "--device", "/dev/null:/dev/testdevice", "--privileged", ALPINE, "ls", "/dev"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(ContainSubstring(" testdevice "), "our custom device")
+		// assumes that /dev/mem always exists
+		Expect(session.OutputToString()).To(ContainSubstring(" mem "), "privileged device")
+
+		session = podmanTest.Podman([]string{"run", "--device", "invalid-device", "--privileged", ALPINE, "ls", "/dev"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "stat invalid-device: no such file or directory"))
+	})
+
 	It("podman run --replace", func() {
 		// Make sure we error out with --name.
 		session := podmanTest.Podman([]string{"create", "--replace", ALPINE, "/bin/sh"})
@@ -2147,7 +2160,8 @@ WORKDIR /madethis`, BB)
 
 		lock := GetPortLock("5006")
 		defer lock.Unlock()
-		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		// FIXME: #23517: using network slirp4netns as work around
+		session := podmanTest.Podman([]string{"run", "-d", "--network", "slirp4netns", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -2160,9 +2174,11 @@ WORKDIR /madethis`, BB)
 		publicKeyFileName, privateKeyFileName, err := WriteRSAKeyPair(keyFileName, bitSize)
 		Expect(err).ToNot(HaveOccurred())
 
-		imgPath := "localhost:5006/my-alpine"
+		imgPath := "localhost:5006/my-alpine-podman-run-and-decrypt"
 		session = podmanTest.Podman([]string{"push", "--encryption-key", "jwe:" + publicKeyFileName, "--tls-verify=false", "--remove-signatures", ALPINE, imgPath})
 		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.ErrorToString()).To(ContainSubstring("Writing manifest to image destination"))
 
 		session = podmanTest.Podman([]string{"rmi", ALPINE})
 		session.WaitWithDefaultTimeout()

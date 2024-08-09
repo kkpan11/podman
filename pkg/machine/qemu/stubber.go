@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -168,9 +167,13 @@ func (q *QEMUStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func()
 	if err != nil {
 		return nil, nil, err
 	}
-	spawner, err := newVirtiofsdSpawner(runtime)
-	if err != nil {
-		return nil, nil, err
+
+	var spawner *virtiofsdSpawner
+	if len(mc.Mounts) > 0 {
+		spawner, err = newVirtiofsdSpawner(runtime)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	for _, hostmnt := range mc.Mounts {
@@ -315,11 +318,15 @@ func (q *QEMUStubber) StartNetworking(mc *vmconfigs.MachineConfig, cmd *gvproxy.
 	if err != nil {
 		return err
 	}
+	socketURL, err := sockets.ToUnixURL(gvProxySock)
+	if err != nil {
+		return err
+	}
 	// make sure it does not exist before gvproxy is called
 	if err := gvProxySock.Delete(); err != nil {
 		logrus.Error(err)
 	}
-	cmd.AddQemuSocket(fmt.Sprintf("unix://%s", filepath.ToSlash(gvProxySock.GetPath())))
+	cmd.AddQemuSocket(socketURL.String())
 	return nil
 }
 

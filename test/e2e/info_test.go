@@ -117,13 +117,11 @@ var _ = Describe("Podman Info", func() {
 			Expect(session.OutputToString()).To(Equal("false"))
 		}
 
-		session = podmanTest.Podman([]string{"info", "--format", "{{.Host.RemoteSocket.Exists}}"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
 		if IsRemote() {
-			Expect(session.OutputToString()).To(ContainSubstring("true"))
-		} else {
-			Expect(session.OutputToString()).To(ContainSubstring("false"))
+			session = podmanTest.Podman([]string{"info", "--format", "{{.Host.RemoteSocket.Exists}}"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).To(Equal("true"))
 		}
 
 	})
@@ -240,6 +238,18 @@ var _ = Describe("Podman Info", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitCleanly())
 		Expect(session.OutputToString()).To(Equal(want), ".Store.GraphDriverName from podman info")
+
+		// Confirm desired setting of composefs
+		if want == "overlay" {
+			expect := "<no value>"
+			if os.Getenv("CI_DESIRED_COMPOSEFS") != "" {
+				expect = "true"
+			}
+			session = podmanTest.Podman([]string{"info", "--format", `{{index .Store.GraphOptions "overlay.use_composefs"}}`})
+			session.WaitWithDefaultTimeout()
+			Expect(session).To(ExitCleanly())
+			Expect(session.OutputToString()).To(Equal(expect), ".Store.GraphOptions -> overlay.use_composefs")
+		}
 	})
 
 	It("Podman info: check lock count", Serial, func() {

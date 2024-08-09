@@ -41,6 +41,27 @@ done
 # Bypass git safety/security checks when operating in a throwaway environment
 showrun git config --global --add safe.directory $GOSRC
 
+# Special case: "composefs" is not a valid setting but it's useful for
+# readability in .cirrus.yml. Here we translate that to overlayfs (the
+# actual filesystem) along with extra magic envariables.
+# Be sure to do this before writing /etc/ci_environment.
+export CI_DESIRED_COMPOSEFS=
+# shellcheck disable=SC2154
+if [[ "$CI_DESIRED_STORAGE" = "composefs" ]]; then
+    CI_DESIRED_STORAGE="overlay"
+
+    # composefs is root only
+    if [[ "$PRIV_NAME" == "root" ]]; then
+        CI_DESIRED_COMPOSEFS="+composefs"
+
+        # KLUDGE ALERT! Magic options needed for testing composefs.
+        # This option was intended for passing one arg to --storage-opt
+        # but we're hijacking it to pass an extra option+arg. And it
+        # actually works.
+        export STORAGE_OPTIONS_OVERLAY='overlay.use_composefs=true --pull-option=enable_partial_images=true --pull-option=convert_images=true'
+    fi
+fi
+
 # Ensure that all lower-level contexts and child-processes have
 # ready access to higher level orchestration (e.g Cirrus-CI)
 # variables.
@@ -126,6 +147,11 @@ case "$OS_RELEASE_ID" in
             msg "Enabling container_manage_cgroup"
             showrun setsebool container_manage_cgroup true
         fi
+
+        # Test nftables driver, https://fedoraproject.org/wiki/Changes/NetavarkNftablesDefault
+        # We can drop this once this implemented and pushed into fedora stable. We cannot test it on
+        # debian because the netavark version there is way to old for nftables support.
+        printf "[network]\nfirewall_driver=\"nftables\"\n" > /etc/containers/containers.conf.d/90-nftables.conf
         ;;
     *) die_unknown OS_RELEASE_ID
 esac
@@ -155,7 +181,7 @@ esac
 # This is (sigh) different because e2e tests have their own special way
 # of ignoring system defaults.
 # shellcheck disable=SC2154
-showrun echo "Setting CI_DESIRED_STORAGE [=$CI_DESIRED_STORAGE] for *system* tests"
+showrun echo "Setting CI_DESIRED_STORAGE [=$CI_DESIRED_STORAGE$CI_DESIRED_COMPOSEFS] for *system* tests"
 conf=/etc/containers/storage.conf
 if [[ -e $conf ]]; then
     die "FATAL! INTERNAL ERROR! Cannot override $conf"
@@ -167,10 +193,22 @@ runroot = "/run/containers/storage"
 graphroot = "/var/lib/containers/storage"
 EOF
 
-# Since we've potentially changed important config settings, reset.
-# This prevents `database graph driver "" does not match "overlay"`
-# on Debian.
-rm -rf /var/lib/containers/storage
+if [[ -n "$CI_DESIRED_COMPOSEFS" ]]; then
+    cat <<EOF >>$conf
+
+# BEGIN CI-enabled composefs
+[storage.options]
+pull_options = {enable_partial_images = "true", use_hard_links = "false", ostree_repos="", convert_images = "true"}
+
+[storage.options.overlay]
+use_composefs = "true"
+# END CI-enabled composefs
+EOF
+fi
+
+# mount a tmpfs for the container storage to speed up the IO
+# side effect is we clear all potentially pre existing data so we know we always start "clean"
+mount -t tmpfs -o size=75%,mode=0700 none /var/lib/containers
 
 # shellcheck disable=SC2154
 showrun echo "Setting CI_DESIRED_STORAGE [=$CI_DESIRED_STORAGE] for *e2e* tests"
@@ -247,6 +285,13 @@ case "$PRIV_NAME" in
     *) die_unknown PRIV_NAME
 esac
 
+# Root user namespace
+for which in uid gid;do
+    if ! grep -qE '^containers:' /etc/sub$which; then
+        echo 'containers:10000000:1048576' >>/etc/sub$which
+    fi
+done
+
 # FIXME! experimental workaround for #16973, the "lookup cdn03.quay.io" flake.
 #
 # If you are reading this on or after April 2023:
@@ -302,6 +347,18 @@ case "$PODBIN_NAME" in
     *) die_unknown PODBIN_NAME
 esac
 
+# As of July 2024, CI VMs come built-in with a registry.
+LCR=/var/cache/local-registry/local-cache-registry
+if [[ -x $LCR ]]; then
+    # Images in cache registry are prepopulated at the time
+    # VMs are built. If any PR adds a dependency on new images,
+    # those must be fetched now, at VM start time. This should
+    # be rare, and must be fixed in next automation_images build.
+    while read new_image; do
+        $LCR cache $new_image
+    done < <(grep '^[^#]' test/NEW-IMAGES || true)
+fi
+
 # Required to be defined by caller: The primary type of testing that will be performed
 # shellcheck disable=SC2154
 showrun echo "about to set up for TEST_FLAVOR [=$TEST_FLAVOR]"
@@ -346,7 +403,7 @@ case "$TEST_FLAVOR" in
         showrun make .install.ginkgo
         ;&
     sys)
-        # when run nighlty check for system test leaks
+        # when run nightly check for system test leaks
         # shellcheck disable=SC2154
         if [[ "$CIRRUS_CRON" != '' ]]; then
             export PODMAN_BATS_LEAK_CHECK=1
@@ -384,14 +441,6 @@ case "$TEST_FLAVOR" in
         showrun make install PREFIX=/usr ETCDIR=/etc
         install_test_configs
         ;;
-    minikube)
-        showrun dnf install -y $PACKAGE_DOWNLOAD_DIR/minikube-latest*
-        remove_packaged_podman_files
-        showrun make install.tools
-        showrun make install PREFIX=/usr ETCDIR=/etc
-        showrun minikube config set driver podman
-        install_test_configs
-        ;;
     machine-linux)
         showrun dnf install -y podman-gvproxy* virtiofsd
         # Bootstrap this link if it isn't yet in the package; xref
@@ -401,7 +450,8 @@ case "$TEST_FLAVOR" in
         fi
         remove_packaged_podman_files
         showrun make install PREFIX=/usr ETCDIR=/etc
-        install_test_configs
+        # machine-os image changes too frequently, can't use image cache
+        install_test_configs nocache
         ;;
     swagger)
         showrun make .install.swagger

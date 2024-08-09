@@ -82,6 +82,11 @@ func (c *Container) prepare() error {
 		// Set up network namespace if not already set up
 		noNetNS := c.state.NetNS == ""
 		if c.config.CreateNetNS && noNetNS && !c.config.PostConfigureNetNS {
+			c.reservedPorts, createNetNSErr = c.bindPorts()
+			if createNetNSErr != nil {
+				return
+			}
+
 			netNS, networkStatus, createNetNSErr = c.runtime.createNetNS(c)
 			if createNetNSErr != nil {
 				return
@@ -148,6 +153,11 @@ func (c *Container) prepare() error {
 	}
 
 	if createErr != nil {
+		for _, f := range c.reservedPorts {
+			// make sure to close all ports again on errors
+			f.Close()
+		}
+		c.reservedPorts = nil
 		return createErr
 	}
 
@@ -177,18 +187,20 @@ func (c *Container) cleanupNetwork() error {
 	}
 
 	// Stop the container's network namespace (if it has one)
-	if err := c.runtime.teardownNetNS(c); err != nil {
-		logrus.Errorf("Unable to clean up network for container %s: %q", c.ID(), err)
-	}
-
+	neterr := c.runtime.teardownNetNS(c)
 	c.state.NetNS = ""
 	c.state.NetworkStatus = nil
 
-	if c.valid {
-		return c.save()
+	// always save even when there was an error
+	err = c.save()
+	if err != nil {
+		if neterr != nil {
+			logrus.Errorf("Unable to clean up network for container %s: %q", c.ID(), neterr)
+		}
+		return err
 	}
 
-	return nil
+	return neterr
 }
 
 // reloadNetwork reloads the network for the given container, recreating

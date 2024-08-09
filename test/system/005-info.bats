@@ -124,6 +124,16 @@ host.slirp4netns.executable | $expr_path
     fi
 
     is "$(podman_storage_driver)" "$CI_DESIRED_STORAGE" "podman storage driver is not CI_DESIRED_STORAGE (from .cirrus.yml)"
+
+    # Confirm desired setting of composefs
+    if [[ "$CI_DESIRED_STORAGE" = "overlay" ]]; then
+        expect="<no value>"
+        if [[ -n "$CI_DESIRED_COMPOSEFS" ]]; then
+            expect="true"
+        fi
+        run_podman info --format '{{index .Store.GraphOptions "overlay.use_composefs"}}'
+        assert "$output" = "$expect" ".Store.GraphOptions -> overlay.use_composefs"
+    fi
 }
 
 # 2021-04-06 discussed in watercooler: RHEL must never use crun, even if
@@ -183,6 +193,13 @@ host.slirp4netns.executable | $expr_path
     new_home=$PODMAN_TMPDIR/home
 
     ln -s /home $new_home
+
+    # Remove volume directory. This doesn't break Podman but can cause our DB
+    # validation to break if Podman misbehaves. Ref:
+    # https://github.com/containers/podman/issues/23515
+    # (Unfortunately, we can't just use a new directory, that will just trip DB
+    # validation that it doesn't match the path we were using before)
+    rm -rf $PODMAN_TMPDIR/$HOME/.local/share/containers/storage/volumes
 
     # Just need the command to run cleanly
     HOME=$PODMAN_TMPDIR/$HOME run_podman info

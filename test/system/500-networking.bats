@@ -54,6 +54,15 @@ load helpers.network
             $IMAGE /bin/busybox-extras httpd -f -p 80
     cid=$output
 
+    # Try to bind the same port again, this must fail.
+    # regression test for https://issues.redhat.com/browse/RHEL-50746
+    # which caused this command to overwrite the firewall rules as root
+    # causing the curl commands below to fail
+    run_podman 126 run --rm -p "$HOST_PORT:80" $IMAGE true
+    # Note error messages differ between root/rootless, so only check port
+    # and the part of the error text that is common.
+    assert "$output" =~ "$HOST_PORT.*ddress already in use" "port in use"
+
     # In that container, create a second file, using exec and redirection
     run_podman exec -i myweb sh -c "cat > index2.txt" <<<"$random_2"
     # ...verify its contents as seen from container.
@@ -61,9 +70,9 @@ load helpers.network
     is "$output" "$random_2" "exec cat index2.txt"
 
     # Verify http contents: curl from localhost
-    run curl -s -S $SERVER/index.txt
+    run curl --max-time 3 -s -S $SERVER/index.txt
     is "$output" "$random_1" "curl 127.0.0.1:/index.txt"
-    run curl -s -S $SERVER/index2.txt
+    run curl --max-time 3 -s -S $SERVER/index2.txt
     is "$output" "$random_2" "curl 127.0.0.1:/index2.txt"
 
     # Verify http contents: wget from a second container
@@ -317,14 +326,16 @@ load helpers.network
     run curl -s -S $SERVER/index.txt
     is "$output" "$random_1" "curl 127.0.0.1:/index.txt"
 
-    # rootless cannot modify iptables
+    # rootless cannot modify the host firewall
     if ! is_rootless; then
-        # flush the port forwarding iptable rule here
-        chain="CNI-HOSTPORT-DNAT"
-        if is_netavark; then
-            chain="NETAVARK-HOSTPORT-DNAT"
-        fi
-        run iptables -t nat -F "$chain"
+        # for debugging only
+        iptables -t nat -nvL || true
+        nft list ruleset     || true
+
+        # flush the firewall rule here to break port forwarding
+        # netavark can use either iptables or nftables, so try flushing both
+        iptables -t nat -F "NETAVARK-HOSTPORT-DNAT" || true
+        nft delete table inet netavark              || true
 
         # check that we cannot curl (timeout after 1 sec)
         run curl --max-time 1 -s $SERVER/index.txt
@@ -726,6 +737,7 @@ nameserver 8.8.8.8" "nameserver order is correct"
     run_podman network rm -f $netname
 }
 
+# bats test_tags=distro-integration
 @test "podman run port forward range" {
     # we run a long loop of tests lets run all combinations before bailing out
     defer-assertion-failures
@@ -755,6 +767,12 @@ nameserver 8.8.8.8" "nameserver order is correct"
 
         run_podman run --network $netmode -p "$range:$range" -d $IMAGE sleep inf
         cid="$output"
+
+        # make sure binding the same port fails
+        run timeout 5 nc -l 127.0.0.1 $port
+        assert "$status" -eq 2 "ncat unexpected exit code"
+        assert "$output" =~ "127.0.0.1:$port: Address already in use" "ncat error message"
+
         for port in $(seq $port $end_port); do
             run_podman exec -d $cid nc -l -p $port -e /bin/cat
 

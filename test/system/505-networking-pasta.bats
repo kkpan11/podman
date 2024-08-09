@@ -784,7 +784,8 @@ EOF
 @test "Podman unshare --rootless-netns with Pasta" {
     skip_if_remote "unshare is local-only"
 
-    pasta_iface=$(default_ifname)
+    pasta_iface=$(default_ifname 4)
+    assert "$pasta_iface" != "" "pasta_iface is set"
 
     # First let's force a setup error by making pasta be "false".
     ln -s /usr/bin/false $PODMAN_TMPDIR/pasta
@@ -800,25 +801,31 @@ EOF
 @test "pasta/bridge and host.containers.internal" {
     skip_if_no_ipv4 "IPv4 not routable on the host"
     pasta_ip="$(default_addr 4)"
+    host_ips=$(ip -4 -j addr | jq -r '.[] | select(.ifname != "lo") | .addr_info[].local')
 
-    for network in "pasta" "bridge"; do
+    netname=n_$(safename)
+    run_podman network create $netname
+
+    for network in "pasta" "$netname"; do
         # special exit code logic needed here, it is possible that there is no host.containers.internal
         # when there is only one ip one the host and that one is used by pasta.
         # As such we have to deal with both cases.
         run_podman '?' run --rm --network=$network $IMAGE grep host.containers.internal /etc/hosts
         if [ "$status" -eq 0 ]; then
             assert "$output" !~ "$pasta_ip" "pasta host ip must not be assigned ($network)"
-            assert "$(hostname -I)" =~ "$(cut -f1 <<<$output)" "ip is one of the host ips ($network)"
+            assert "$host_ips" =~ "$(cut -f1 <<<$output)" "ip is one of the host ips ($network)"
         elif [ "$status" -eq 1 ]; then
             # if only pasta ip then we cannot have a host.containers.internal entry
             # make sure this fact is actually the case
-            assert "$pasta_ip" == "$(hostname -I | tr -d '[:space:]')" "pasta ip must the only one one the host ($network)"
+            assert "$pasta_ip" == "$host_ips" "pasta ip must the only one one the host ($network)"
         else
             die "unexpected exit code '$status' from grep or podman ($network)"
         fi
     done
 
-    host_ip=$(hostname -I | cut -f 1 -d " ")
+    run_podman network rm $netname
+
+    first_host_ip=$(head -n 1 <<<"$host_ips")
     run_podman run --rm --network=pasta:-a,169.254.0.2,-g,169.254.0.1,-n,24 $IMAGE grep host.containers.internal /etc/hosts
-    assert "$output" =~ "^$host_ip" "uses host first ip"
+    assert "$output" =~ "^$first_host_ip" "uses host first ip"
 }

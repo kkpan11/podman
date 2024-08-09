@@ -210,7 +210,14 @@ func newRuntimeFromConfig(ctx context.Context, conf *config.Config, options ...R
 		}
 	}
 
+	if err := makeRuntime(ctx, runtime); err != nil {
+		return nil, err
+	}
+
 	if err := shutdown.Register("libpod", func(sig os.Signal) error {
+		if runtime.store != nil {
+			_, _ = runtime.store.Shutdown(false)
+		}
 		// For `systemctl stop podman.service` support, exit code should be 0
 		if sig == syscall.SIGTERM {
 			os.Exit(0)
@@ -223,10 +230,6 @@ func newRuntimeFromConfig(ctx context.Context, conf *config.Config, options ...R
 
 	if err := shutdown.Start(); err != nil {
 		return nil, fmt.Errorf("starting shutdown signal handler: %w", err)
-	}
-
-	if err := makeRuntime(ctx, runtime); err != nil {
-		return nil, err
 	}
 
 	runtime.config.CheckCgroupsAndAdjustConfig()
@@ -364,6 +367,14 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 	// Create the TmpDir if needed
 	if err := os.MkdirAll(runtime.config.Engine.TmpDir, 0751); err != nil {
 		return fmt.Errorf("creating runtime temporary files directory: %w", err)
+	}
+
+	// Create the volume path if needed.
+	// This is not strictly necessary at this point, but the path not
+	// existing can cause troubles with DB path validation on OSTree based
+	// systems. Ref: https://github.com/containers/podman/issues/23515
+	if err := os.MkdirAll(runtime.config.Engine.VolumePath, 0700); err != nil {
+		return fmt.Errorf("creating runtime volume path directory: %w", err)
 	}
 
 	// Set up the state.
@@ -612,6 +623,11 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 	// Should not be a big deal as we don't return it to users until after
 	// refresh runs.
 	runtime.valid = true
+
+	// Setup the worker channel early to start accepting jobs from refresh,
+	// but do not start to execute the jobs right away. The runtime is not
+	// ready at this point.
+	runtime.setupWorkerQueue()
 
 	// If we need to refresh the state, do it now - things are guaranteed to
 	// be set up by now.

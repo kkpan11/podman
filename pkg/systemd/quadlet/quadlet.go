@@ -20,6 +20,8 @@ const (
 	// github.com/containers/podman/v5/libpod/define.AutoUpdateLabel
 	// but it is causing bloat
 	autoUpdateLabel = "io.containers.autoupdate"
+	// Directory for temporary Quadlet files (sysadmin owned)
+	UnitDirTemp = "/run/containers/systemd"
 	// Directory for global Quadlet files (sysadmin owned)
 	UnitDirAdmin = "/etc/containers/systemd"
 	// Directory for global Quadlet files (distro owned)
@@ -110,9 +112,11 @@ const (
 	KeyKubeDownForce         = "KubeDownForce"
 	KeyLabel                 = "Label"
 	KeyLogDriver             = "LogDriver"
+	KeyLogOpt                = "LogOpt"
 	KeyMask                  = "Mask"
 	KeyMount                 = "Mount"
 	KeyNetwork               = "Network"
+	KeyNetworkAlias          = "NetworkAlias"
 	KeyNetworkName           = "NetworkName"
 	KeyNoNewPrivileges       = "NoNewPrivileges"
 	KeyNotify                = "Notify"
@@ -139,8 +143,10 @@ const (
 	KeySecurityLabelLevel    = "SecurityLabelLevel"
 	KeySecurityLabelNested   = "SecurityLabelNested"
 	KeySecurityLabelType     = "SecurityLabelType"
+	KeyServiceName           = "ServiceName"
 	KeySetWorkingDirectory   = "SetWorkingDirectory"
 	KeyShmSize               = "ShmSize"
+	KeyStopSignal            = "StopSignal"
 	KeyStopTimeout           = "StopTimeout"
 	KeySubGIDMap             = "SubGIDMap"
 	KeySubnet                = "Subnet"
@@ -212,9 +218,11 @@ var (
 		KeyImage:                 true,
 		KeyLabel:                 true,
 		KeyLogDriver:             true,
+		KeyLogOpt:                true,
 		KeyMask:                  true,
 		KeyMount:                 true,
 		KeyNetwork:               true,
+		KeyNetworkAlias:          true,
 		KeyNoNewPrivileges:       true,
 		KeyNotify:                true,
 		KeyPidsLimit:             true,
@@ -238,6 +246,7 @@ var (
 		KeySecurityLabelNested:   true,
 		KeySecurityLabelType:     true,
 		KeyShmSize:               true,
+		KeyStopSignal:            true,
 		KeyStopTimeout:           true,
 		KeySubGIDMap:             true,
 		KeySubUIDMap:             true,
@@ -299,6 +308,7 @@ var (
 		KeyGlobalArgs:           true,
 		KeyKubeDownForce:        true,
 		KeyLogDriver:            true,
+		KeyLogOpt:               true,
 		KeyNetwork:              true,
 		KeyPodmanArgs:           true,
 		KeyPublishPort:          true,
@@ -360,9 +370,11 @@ var (
 		KeyContainersConfModule: true,
 		KeyGlobalArgs:           true,
 		KeyNetwork:              true,
+		KeyNetworkAlias:         true,
 		KeyPodName:              true,
 		KeyPodmanArgs:           true,
 		KeyPublishPort:          true,
+		KeyServiceName:          true,
 		KeyVolume:               true,
 	}
 )
@@ -544,6 +556,7 @@ func ConvertContainer(container *parser.UnitFile, names map[string]string, isUse
 	)
 
 	handleLogDriver(container, ContainerGroup, podman)
+	handleLogOpt(container, ContainerGroup, podman)
 
 	// We delegate groups to the runtime
 	service.Add(ServiceGroup, "Delegate", "yes")
@@ -555,6 +568,11 @@ func ConvertContainer(container *parser.UnitFile, names map[string]string, isUse
 	}
 
 	addNetworks(container, ContainerGroup, service, names, podman)
+
+	networkAliases := container.LookupAll(ContainerGroup, KeyNetworkAlias)
+	for _, networkAlias := range networkAliases {
+		podman.add("--network-alias", networkAlias)
+	}
 
 	// Run with a pid1 init to reap zombies by default (as most apps don't do that)
 	runInit, ok := container.LookupBoolean(ContainerGroup, KeyRunInit)
@@ -599,12 +617,12 @@ func ConvertContainer(container *parser.UnitFile, names map[string]string, isUse
 
 	securityLabelDisable := container.LookupBooleanWithDefault(ContainerGroup, KeySecurityLabelDisable, false)
 	if securityLabelDisable {
-		podman.add("--security-opt", "label:disable")
+		podman.add("--security-opt", "label=disable")
 	}
 
 	securityLabelNested := container.LookupBooleanWithDefault(ContainerGroup, KeySecurityLabelNested, false)
 	if securityLabelNested {
-		podman.add("--security-opt", "label:nested")
+		podman.add("--security-opt", "label=nested")
 	}
 
 	pidsLimit, ok := container.Lookup(ContainerGroup, KeyPidsLimit)
@@ -829,6 +847,10 @@ func ConvertContainer(container *parser.UnitFile, names map[string]string, isUse
 
 	if err := handlePod(container, service, ContainerGroup, podsInfoMap, podman); err != nil {
 		return nil, err
+	}
+
+	if stopSignal, ok := container.Lookup(ContainerGroup, KeyStopSignal); ok && len(stopSignal) > 0 {
+		podman.add("--stop-signal", stopSignal)
 	}
 
 	if stopTimeout, ok := container.Lookup(ContainerGroup, KeyStopTimeout); ok && len(stopTimeout) > 0 {
@@ -1164,6 +1186,7 @@ func ConvertKube(kube *parser.UnitFile, names map[string]string, isUser bool) (*
 	}
 
 	handleLogDriver(kube, KubeGroup, execStart)
+	handleLogOpt(kube, KubeGroup, execStart)
 
 	if err := handleUserMappings(kube, KubeGroup, execStart, isUser, false); err != nil {
 		return nil, err
@@ -1453,6 +1476,9 @@ func GetBuiltImageName(buildUnit *parser.UnitFile) string {
 }
 
 func GetPodServiceName(podUnit *parser.UnitFile) string {
+	if serviceName, ok := podUnit.Lookup(PodGroup, KeyServiceName); ok {
+		return serviceName
+	}
 	return replaceExtension(podUnit.Filename, "", "", "-pod")
 }
 
@@ -1530,6 +1556,11 @@ func ConvertPod(podUnit *parser.UnitFile, name string, podsInfoMap map[string]*P
 	}
 
 	addNetworks(podUnit, PodGroup, service, names, execStartPre)
+
+	networkAliases := podUnit.LookupAll(PodGroup, KeyNetworkAlias)
+	for _, networkAlias := range networkAliases {
+		execStartPre.add("--network-alias", networkAlias)
+	}
 
 	if err := addVolumes(podUnit, service, PodGroup, names, execStartPre); err != nil {
 		return nil, err
@@ -1810,6 +1841,13 @@ func handleLogDriver(unitFile *parser.UnitFile, groupName string, podman *Podman
 	logDriver, found := unitFile.Lookup(groupName, KeyLogDriver)
 	if found {
 		podman.add("--log-driver", logDriver)
+	}
+}
+
+func handleLogOpt(unitFile *parser.UnitFile, groupName string, podman *PodmanCmdline) {
+	logOpts := unitFile.LookupAllStrv(groupName, KeyLogOpt)
+	for _, logOpt := range logOpts {
+		podman.add("--log-opt", logOpt)
 	}
 }
 

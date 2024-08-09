@@ -10,7 +10,8 @@ Windows.
   - [OS requirements](#os-requirements)
   - [Git and go](#git-and-go)
   - [Pandoc](#pandoc)
-  - [WiX Toolset v3](#wix-toolset-v3)
+  - [.NET SDK](#net-sdk)
+  - [Visual Studio Build Tools](#visual-studio-build-tools)
   - [Virtualization Provider](#virtualization-provider)
     - [WSL](#wsl)
     - [Hyper-V](#hyper-v)
@@ -23,8 +24,8 @@ Windows.
   - [Create and start a podman machine](#create-and-start-a-podman-machine)
   - [Run a container using podman](#run-a-container-using-podman)
 - [Build and test the Podman Windows installer](#build-and-test-the-podman-windows-installer)
-  - [Build the installer](#build-the-installer)
-  - [Test the installer](#test-the-installer)
+  - [Build the Windows installer](#build-the-windows-installer)
+  - [Test the Windows installer](#test-the-windows-installer)
   - [Build and test the standalone `podman.msi` file](#build-and-test-the-standalone-podmanmsi-file)
   - [Verify the installation](#verify-the-installation)
   - [Uninstall and clean-up](#uninstall-and-clean-up)
@@ -70,14 +71,46 @@ Pandoc can be installed from https://pandoc.org/installing.html. When performing
 the Pandoc installation one, has to choose the option "Install for all users"
 (to put the binaries into "Program Files" directory).
 
-### WiX Toolset v3
+### .NET SDK
 
-[WiX Toolset](https://wixtoolset.org) **v3** is used to develop and build the
-Podman Windows installer. It's not required for the Podman Windows client.
-Version 3 of the WiX Toolset can be obtained from
-https://wixtoolset.org/docs/wix3/. Installing it into a clean VM might require
-an additional installation of .NET Framework 3.5 in advance
-([instructions for adding .NET Framework 3.5 via enabling the Windows feature](https://learn.microsoft.com/en-us/dotnet/framework/install/dotnet-35-windows#enable-the-net-framework-35-in-control-panel))
+[.NET SDK](https://learn.microsoft.com/en-us/dotnet/core/sdk), version 6 or
+later, is required to develop and build the Podman Windows installer. It's not
+required for the Podman Windows client.
+
+```pwsh
+winget install -e Microsoft.DotNet.SDK.8
+```
+
+[WiX Toolset](https://wixtoolset.org) **v5**, distributed as a .NET SDK tool, is
+used too and can be installed using `dotnet install`:
+
+```pwsh
+dotnet tool install --global wix
+```
+
+### Visual Studio Build Tools
+
+The installer includes a C program that checks the installation of the
+pre-required virtualization providers (WSL or Hyper-V). Building this program
+requires the
+[Microsoft C/C++ compiler](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170) and the
+[PowerShell Module VSSetup](https://github.com/microsoft/vssetup.powershell):
+
+1. Download the Build Tools for Visual Studio 2022 installer
+```pwsh
+Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile "$env:TEMP\vs_BuildTools.exe"
+```
+2. Run the installer with the parameter to include the optional C/C++ Tools
+```pwsh
+& "$env:TEMP\vs_BuildTools.exe" --passive --wait `
+                      --add Microsoft.VisualStudio.Workload.VCTools `
+                      --includeRecommended `
+                      --remove Microsoft.VisualStudio.Component.VC.CMake.Project
+```
+3. Install the PowerShell Module VSSetup
+```pwsh
+Install-Module VSSetup
+```
 
 ### Virtualization Provider
 
@@ -304,9 +337,9 @@ The `installer` target of `winmake.ps1` runs the script
 
 - `build-hooks.bat`: builds `podman-wslkerninst.exe` (WSL kernel installer) and
   `podman-msihooks.dll` (helper that checks if WSL and Hyper-V are installed).
-- `build-msi.bat`: builds `podman.msi` from the WiX source files `podman.wxs`,
+- `dotnet build podman.wixproj`: builds `podman.msi` from the WiX source files `podman.wxs`,
   `pages.wxs`, `podman-ui.wxs` and `welcome-install-dlg.wxs`.
-- `build-burn.bat`: builds `podman-setup.exe` file from
+- `dotnet build podman-setup.wixproj`: builds `podman-setup.exe` file from
   [WiX Burn bundle](https://wixtoolset.org/docs/tools/burn/) `burn.wxs`.
 
 ### Test the Windows installer
@@ -329,7 +362,18 @@ set the bundle variables `MachineProvider` (`wsl` or `hyperv`), `WSLCheckbox`
 otherwise):
 
 ```pwsh
-contrib\win-installer\podman-5.1.0-dev-setup.exe /install /log podman-setup.log /quiet MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
+contrib\win-installer\podman-5.1.0-dev-setup.exe /install `
+                      /log podman-setup.log /quiet `
+                      MachineProvider=wsl WSLCheckbox=0 HyperVCheckbox=0
+```
+
+#### Run the Windows installer automated tests
+
+The following command executes a number of tests of the windows installer. Running
+it requires an administrator terminal.
+
+```pwsh
+.\winmake.ps1 installertest
 ```
 
 ### Build and test the standalone `podman.msi` file
@@ -340,21 +384,20 @@ Podman is released (it's included in the `podman-setup.exe` bundle), it can be
 faster to build and test that rather than the full bundle during the development
 phase.
 
-Run the script `contrib\win-installer\build-msi.bat` to build the standalone
-`podman.msi` file:
+Run the command `dotnet build` to build the standalone `podman.msi` file:
 
 ```pwsh
 Push-Location .\contrib\win-installer\
-.\build-msi.bat 9.9.9
+dotnet build podman.wixproj /property:DefineConstants="VERSION=9.9.9" -o .
 Pop-Location
 ```
 
-It creates the file `.\contrib\win-installer\podman.msi`. Test it using the
+It creates the file `.\contrib\win-installer\en-US\podman.msi`. Test it using the
 [Microsoft Standard Installer](https://learn.microsoft.com/en-us/windows/win32/msi/standard-installer-command-line-options)
 command line tool:
 
 ```pwsh
-msiexec /package contrib\win-installer\podman.msi /l*v podman-msi.log
+msiexec /package contrib\win-installer\en-US\podman.msi /l*v podman-msi.log
 ```
 
 To run it in quiet, non-interactive mode, open the terminal **as an
@@ -364,7 +407,7 @@ of the installation, `0` otherwise) and `WITH_HYPERV` (`1` to install Hyper-V as
 part of the installation, `0` otherwise):
 
 ```pwsh
-msiexec /package contrib\win-installer\podman.msi /l*v podman-msi.log /quiet MACHINE_PROVIDER=wsl WITH_WSL=0 WITH_HYPERV=0
+msiexec /package contrib\win-installer\en-US\podman.msi /l*v podman-msi.log /quiet MACHINE_PROVIDER=wsl WITH_WSL=0 WITH_HYPERV=0
 ```
 
 :information_source: `podman.msi` GUI dialogs, defined in the file
@@ -390,12 +433,12 @@ Test-Path -Path "$ENV:PROGRAMFILES\RedHat\Podman\podman.exe"
 # Check the generation of the podman configuration file
 Test-Path -Path "$ENV:PROGRAMDATA\containers\containers.conf.d\99-podman-machine-provider.conf"
 # Check that the installer configured the right provider
-Get-Content '$ENV:PROGRAMDATA\containers\containers.conf.d\99-podman-machine-provider.conf' | Select -Skip 1 | ConvertFrom-StringData | % { $_.provider }
+Get-Content "$ENV:PROGRAMDATA\containers\containers.conf.d\99-podman-machine-provider.conf" | Select -Skip 1 | ConvertFrom-StringData | % { $_.provider }
 # Check the creation of the registry key
 Test-Path -Path "HKLM:\SOFTWARE\Red Hat\Podman"
 Get-ItemProperty "HKLM:\SOFTWARE\Red Hat\Podman" InstallDir
 # Check the podman.exe is in the $PATH
-$env:PATH | Select-String -Pattern "$ENV:PROGRAMFILES\RedHat\Podman"
+$env:PATH | Select-String -Pattern "Podman"
 ```
 
 :information_source: Podman CI uses script
@@ -437,7 +480,7 @@ $foldersToCheck = @(
     "$env:USERPROFILE.config\containers\"
     "$env:USERPROFILE.local\share\containers\"
     "$ENV:LOCALAPPDATA\containers\"
-    "$ENV:APPDATA\containers\containers.conf.d\99-podman-machine-provider.conf"
+    "$ENV:PROGRAMDATA\containers\containers.conf.d\99-podman-machine-provider.conf"
 )
 $foldersToCheck | ForEach-Object {Test-Path -Path $PSItem}
 ```

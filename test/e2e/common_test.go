@@ -33,7 +33,6 @@ import (
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -266,11 +265,6 @@ func PodmanTestCreateUtil(tempDir string, remote bool) *PodmanTestIntegration {
 		}
 	}
 
-	storageOptions := os.Getenv("STORAGE_OPTIONS")
-	if storageOptions == "" {
-		storageOptions = STORAGE_OPTIONS
-	}
-
 	cgroupManager := os.Getenv("CGROUP_MANAGER")
 	if cgroupManager == "" {
 		cgroupManager = CGROUP_MANAGER
@@ -313,9 +307,17 @@ func PodmanTestCreateUtil(tempDir string, remote bool) *PodmanTestIntegration {
 	if isRootless() {
 		storageFs = ROOTLESS_STORAGE_FS
 	}
+
+	storageOptions := STORAGE_OPTIONS
 	if os.Getenv("STORAGE_FS") != "" {
 		storageFs = os.Getenv("STORAGE_FS")
 		storageOptions = "--storage-driver " + storageFs
+
+		// Look for STORAGE_OPTIONS_OVERLAY / STORAGE_OPTIONS_VFS
+		extraOptions := os.Getenv("STORAGE_OPTIONS_" + strings.ToUpper(storageFs))
+		if extraOptions != "" {
+			storageOptions += " --storage-opt " + extraOptions
+		}
 	}
 
 	p := &PodmanTestIntegration{
@@ -398,6 +400,30 @@ func imageTarPath(image string) string {
 	return filepath.Join(cacheDir, imageCacheName)
 }
 
+func (p *PodmanTestIntegration) pullImage(image string, toCache bool) {
+	if toCache {
+		oldRoot := p.Root
+		p.Root = p.ImageCacheDir
+		defer func() {
+			p.Root = oldRoot
+		}()
+	}
+	for try := 0; try < 3; try++ {
+		podmanSession := p.PodmanBase([]string{"pull", image}, toCache, true)
+		pull := PodmanSessionIntegration{podmanSession}
+		pull.Wait(440)
+		if pull.ExitCode() == 0 {
+			break
+		}
+		if try == 2 {
+			Expect(pull).Should(Exit(0), "Failed after many retries")
+		}
+
+		GinkgoWriter.Println("Will wait and retry")
+		time.Sleep(time.Duration(try+1) * 5 * time.Second)
+	}
+}
+
 // createArtifact creates a cached image tarball in a local directory
 func (p *PodmanTestIntegration) createArtifact(image string) {
 	if os.Getenv("NO_TEST_CACHE") != "" {
@@ -406,19 +432,8 @@ func (p *PodmanTestIntegration) createArtifact(image string) {
 	destName := imageTarPath(image)
 	if _, err := os.Stat(destName); os.IsNotExist(err) {
 		GinkgoWriter.Printf("Caching %s at %s...\n", image, destName)
-		for try := 0; try < 3; try++ {
-			pull := p.PodmanNoCache([]string{"pull", image})
-			pull.Wait(440)
-			if pull.ExitCode() == 0 {
-				break
-			}
-			if try == 2 {
-				Expect(pull).Should(Exit(0), "Failed after many retries")
-			}
 
-			GinkgoWriter.Println("Will wait and retry")
-			time.Sleep(time.Duration(try+1) * 5 * time.Second)
-		}
+		p.pullImage(image, false)
 
 		save := p.PodmanNoCache([]string{"save", "-o", destName, image})
 		save.Wait(90)
@@ -1034,8 +1049,14 @@ func (p *PodmanTestIntegration) RestoreArtifactToCache(image string) error {
 
 func populateCache(podman *PodmanTestIntegration) {
 	for _, image := range CACHE_IMAGES {
-		err := podman.RestoreArtifactToCache(image)
-		Expect(err).ToNot(HaveOccurred())
+		// FIXME: Remove this hack once composefs can be used with images
+		// pulled from sources other than a registry.
+		if strings.Contains(podman.StorageOptions, "overlay.use_composefs=true") {
+			podman.pullImage(image, true)
+		} else {
+			err := podman.RestoreArtifactToCache(image)
+			Expect(err).ToNot(HaveOccurred())
+		}
 	}
 	// logformatter uses this to recognize the first test
 	GinkgoWriter.Printf("-----------------------------\n")
@@ -1054,16 +1075,6 @@ func rmAll(podmanBin string, path string) {
 			GinkgoWriter.Printf("%v\n", err)
 		}
 	} else {
-		// When using overlay as root, podman leaves a stray mount behind.
-		// This leak causes remote tests to take a loooooong time, which
-		// then causes Cirrus to time out. Unmount that stray.
-		overlayPath := path + "/root/overlay"
-		if _, err := os.Stat(overlayPath); err == nil {
-			if err = unix.Unmount(overlayPath, unix.MNT_DETACH); err != nil {
-				GinkgoWriter.Printf("Error unmounting %s: %v\n", overlayPath, err)
-			}
-		}
-
 		if err = os.RemoveAll(path); err != nil {
 			GinkgoWriter.Printf("%q\n", err)
 		}
@@ -1489,4 +1500,8 @@ func CopySymLink(source, dest string) error {
 		return err
 	}
 	return os.Symlink(link, dest)
+}
+
+func UsingCacheRegistry() bool {
+	return os.Getenv("CI_USE_REGISTRY_CACHE") != ""
 }

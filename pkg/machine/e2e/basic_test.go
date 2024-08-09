@@ -18,17 +18,6 @@ import (
 )
 
 var _ = Describe("run basic podman commands", func() {
-	var (
-		mb      *machineTestBuilder
-		testDir string
-	)
-
-	BeforeEach(func() {
-		testDir, mb = setup()
-	})
-	AfterEach(func() {
-		teardown(originalHomeDir, testDir, mb)
-	})
 
 	It("Basic ops", func() {
 		// golangci-lint has trouble with actually skipping tests marked Skip
@@ -72,6 +61,7 @@ var _ = Describe("run basic podman commands", func() {
 
 	It("Volume ops", func() {
 		skipIfVmtype(define.HyperVVirt, "FIXME: #21036 - Hyper-V podman run -v fails due to path translation issues")
+		skipIfVmtype(define.LibKrun, "FIXME: #23296 - Fails on MacOS when libkrun in use.")
 
 		tDir, err := filepath.Abs(GinkgoT().TempDir())
 		Expect(err).ToNot(HaveOccurred())
@@ -126,6 +116,33 @@ var _ = Describe("run basic podman commands", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(findmnt).To(Exit(0))
 		Expect(findmnt.outputToString()).To(ContainSubstring("virtiofs"))
+	})
+
+	It("Volume should be disabled by command line", func() {
+		skipIfWSL("Requires standard volume handling")
+		skipIfVmtype(define.AppleHvVirt, "Skipped on Apple platform")
+		skipIfVmtype(define.LibKrun, "Skipped on Apple platform")
+
+		name := randomString()
+		i := new(initMachine).withImage(mb.imagePath).withNow()
+
+		// Empty arg forces no volumes
+		i.withVolume("")
+		session, err := mb.setName(name).setCmd(i).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		ssh9p := new(sshMachine).withSSHCommand([]string{"findmnt", "-no", "FSTYPE", "-t", "9p"})
+		findmnt9p, err := mb.setName(name).setCmd(ssh9p).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(findmnt9p).To(Exit(0))
+		Expect(findmnt9p.outputToString()).To(BeEmpty())
+
+		sshVirtiofs := new(sshMachine).withSSHCommand([]string{"findmnt", "-no", "FSTYPE", "-t", "virtiofs"})
+		findmntVirtiofs, err := mb.setName(name).setCmd(sshVirtiofs).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(findmntVirtiofs).To(Exit(0))
+		Expect(findmntVirtiofs.outputToString()).To(BeEmpty())
 	})
 
 	It("Podman ops with port forwarding and gvproxy", func() {
@@ -190,6 +207,47 @@ var _ = Describe("run basic podman commands", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ls).To(Exit(0))
 		Expect(ls.outputToString()).To(ContainSubstring(testString))
+	})
+
+	It("podman build contexts", func() {
+		skipIfVmtype(define.HyperVVirt, "FIXME: #23429 - Error running podman build with option --build-context on Hyper-V")
+		skipIfVmtype(define.QemuVirt, "FIXME: #23433 - Additional build contexts should be sent as additional tar files")
+		skipIfVmtype(define.LibKrun, "FIXME: #23296 - Fails on MacOS when libkrun in use.")
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withNow()).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		mainContextDir := GinkgoT().TempDir()
+		cfile := filepath.Join(mainContextDir, "test1")
+		err = os.WriteFile(cfile, []byte(name), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		additionalContextDir := GinkgoT().TempDir()
+		cfile = filepath.Join(additionalContextDir, "test2")
+		err = os.WriteFile(cfile, []byte(name), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		cfile = filepath.Join(mainContextDir, "Containerfile")
+		err = os.WriteFile(cfile, []byte("FROM quay.io/libpod/alpine_nginx\nCOPY test1 /\nCOPY --from=test-context test2 /\n"), 0o644)
+		Expect(err).ToNot(HaveOccurred())
+
+		bm := basicMachine{}
+		build, err := mb.setCmd(bm.withPodmanCommand([]string{"build", "-t", name, "--build-context", "test-context=" + additionalContextDir, mainContextDir})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(build).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring("COMMIT"))
+
+		run, err := mb.setCmd(bm.withPodmanCommand([]string{"run", name, "cat", "/test1"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(run).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring(name))
+
+		run, err = mb.setCmd(bm.withPodmanCommand([]string{"run", name, "cat", "/test2"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(run).To(Exit(0))
+		Expect(build.outputToString()).To(ContainSubstring(name))
 	})
 })
 
